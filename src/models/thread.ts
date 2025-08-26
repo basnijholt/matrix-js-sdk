@@ -465,10 +465,12 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
             } else {
                 this.addEventToTimeline(event, toStartOfTimeline);
             }
+            
+            // Only aggregate AFTER adding to timeline when thread is initialized
+            // This ensures the target event can be found in the timeline
+            this.timelineSet.relations?.aggregateParentEvent(event);
+            this.timelineSet.relations?.aggregateChildEvent(event, this.timelineSet);
         }
-        // Apply annotations and replace relations to the relations of the timeline only
-        this.timelineSet.relations?.aggregateParentEvent(event);
-        this.timelineSet.relations?.aggregateChildEvent(event, this.timelineSet);
     }
 
     public async processEvent(event: Optional<MatrixEvent>): Promise<void> {
