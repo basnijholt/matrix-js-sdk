@@ -440,10 +440,9 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
              */
             this.replayEvents?.push(event);
 
-            // For annotations (reactions), we can aggregate immediately as they don't
-            // have the same race condition issues as edits
+            // For annotations (reactions), aggregate immediately (pre-init)
+            // Only aggregate as child: parent aggregation is unnecessary here
             if (event.isRelation(RelationType.Annotation)) {
-                this.timelineSet.relations?.aggregateParentEvent(event);
                 this.timelineSet.relations?.aggregateChildEvent(event, this.timelineSet);
             }
         } else {
@@ -472,11 +471,7 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
             } else {
                 this.addEventToTimeline(event, toStartOfTimeline);
             }
-            
-            // Only aggregate AFTER adding to timeline when thread is initialized
-            // This ensures the target event can be found in the timeline
-            this.timelineSet.relations?.aggregateParentEvent(event);
-            this.timelineSet.relations?.aggregateChildEvent(event, this.timelineSet);
+            // Aggregation is handled by EventTimelineSet when inserting/adding.
         }
     }
 

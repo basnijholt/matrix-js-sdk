@@ -865,9 +865,8 @@ describe("Thread", () => {
                 // At this point, the original message should NOT have the edits aggregated yet
                 // because they were attempted when the target wasn't in timeline
                 const replacingEventBeforeReplay = originalMessage.replacingEvent();
-                
-                // With the bug, this should be null
-                console.log("Replacing event before replay:", replacingEventBeforeReplay?.getId());
+                // With the fix, edits should not be aggregated yet (pre-init)
+                expect(replacingEventBeforeReplay).toBeNull();
                 
                 // Then replay the edits
                 for (const event of replayEvents) {
@@ -882,6 +881,102 @@ describe("Thread", () => {
                 
                 // The content should also be updated
                 expect(originalMessage.getContent().body).toBe("Final edit");
+
+                // Relations for replaces should now exist and include all edits in order
+                const replaceRels = thread.timelineSet.relations!.getChildEventsForEvent(
+                    originalMessage.getId()!,
+                    RelationType.Replace,
+                    EventType.RoomMessage,
+                )!;
+                const replaceIds = replaceRels.getRelations().map((e) => e.getId());
+                expect(replaceIds).toHaveLength(3);
+                expect(replaceIds[0]).toBe(edit1.getId());
+                expect(replaceIds[1]).toBe(edit2.getId());
+                expect(replaceIds[2]).toBe(edit3.getId());
+            });
+
+            it("Reactions aggregate pre-init and remain idempotent on replay", async () => {
+                const myUserId = "@alice:example.org";
+                const testClient = new TestClient(myUserId, "DEVICE", "ACCESS_TOKEN", undefined, { timelineSupport: false });
+                const client = testClient.client;
+                client.supportsThreads = jest.fn().mockReturnValue(true);
+
+                // Force server-side support so threads start uninitialised
+                const prevSupport = Thread.hasServerSideSupport;
+                Thread.setServerSideSupport(FeatureSupport.Stable);
+
+                try {
+                    const room = new Room("!room:z", client, myUserId, {
+                        pendingEventOrdering: PendingEventOrdering.Detached,
+                    });
+                    jest.spyOn(client, "getRoom").mockReturnValue(room);
+
+                    // Create a root event and thread
+                    const rootEvent = mkMessage({ room: room.roomId, user: myUserId, msg: "Root", event: true });
+                    const thread = new Thread(rootEvent.getId()!, rootEvent, {
+                        room,
+                        client,
+                        pendingEventOrdering: PendingEventOrdering.Detached,
+                    });
+
+                    expect(thread.initialEventsFetched).toBe(false);
+
+                    // A message inside the thread to react to
+                    const originalMessage = mkMessage({
+                        room: room.roomId,
+                        user: myUserId,
+                        msg: "Thread message",
+                        relatesTo: {
+                            rel_type: THREAD_RELATION_TYPE.name,
+                            event_id: thread.id,
+                            "m.in_reply_to": { event_id: thread.id },
+                        },
+                        event: true,
+                    });
+
+                    // Create 2 reactions before the message is in the timeline (pre-init)
+                    const reaction1 = mkReaction(originalMessage, client, myUserId, room.roomId);
+                    const reaction2 = mkReaction(originalMessage, client, myUserId, room.roomId);
+
+                    // Add reactions while thread is NOT initialised
+                    thread.addEvent(reaction1, false);
+                    thread.addEvent(reaction2, false);
+
+                    // Relations should already include the reactions pre-init
+                    const relsBefore = thread.timelineSet.relations!.getChildEventsForEvent(
+                        originalMessage.getId()!,
+                        RelationType.Annotation,
+                        EventType.Reaction,
+                    )!;
+                    expect(relsBefore).toBeTruthy();
+                    const beforeIds = new Set(relsBefore.getRelations().map((e) => e.getId()));
+                    expect(beforeIds.size).toBe(2);
+
+                    // Now initialise and replay
+                    // Ensure reactions are queued for replay as well
+                    expect(thread.replayEvents).toHaveLength(2);
+                    const replay = [...(thread.replayEvents || [])];
+                    thread.replayEvents = [];
+                    thread.initialEventsFetched = true;
+
+                    // Add the original message first so it becomes findable
+                    thread.addEvent(originalMessage, false);
+                    // Replay reactions
+                    for (const ev of replay) thread.addEvent(ev, false);
+
+                    // Ensure no duplicates after replay (idempotent aggregation)
+                    const relsAfter = thread.timelineSet.relations!.getChildEventsForEvent(
+                        originalMessage.getId()!,
+                        RelationType.Annotation,
+                        EventType.Reaction,
+                    )!;
+                    const afterIds = new Set(relsAfter.getRelations().map((e) => e.getId()));
+                    expect(afterIds.size).toBe(2);
+                    expect(afterIds).toEqual(beforeIds);
+                } finally {
+                    // restore
+                    Thread.setServerSideSupport(prevSupport);
+                }
             });
         });
     });
