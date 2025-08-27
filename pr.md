@@ -25,42 +25,10 @@ This prevents premature aggregation of edits that creates broken Relations with 
 ## Technical Details
 
 ### Root Cause
-In `Thread.addRelatedThreadEvent()`, aggregation was happening unconditionally at the end of the method:
-```typescript
-private addRelatedThreadEvent(event: MatrixEvent, toStartOfTimeline: boolean): void {
-    if (!this.initialEventsFetched) {
-        this.replayEvents?.push(event);  // Queue for later
-    } else {
-        // Add to timeline...
-    }
-    // BUG: Aggregation happens even when thread not initialized!
-    this.timelineSet.relations?.aggregateParentEvent(event);
-    this.timelineSet.relations?.aggregateChildEvent(event, this.timelineSet);
-}
-```
-
-When the thread isn't initialized, the aggregation calls fail to find the target event (it's not in the timeline yet), resulting in a Relations object with `targetEvent: null`.
+`addRelatedThreadEvent()` aggregated relations even when `initialEventsFetched = false`. If the target message wasn’t yet present in the thread timeline, Replace aggregation created a relations container with no `targetEvent`, so the edit did not apply.
 
 ### The Fix
-```typescript
-private addRelatedThreadEvent(event: MatrixEvent, toStartOfTimeline: boolean): void {
-    if (!this.initialEventsFetched) {
-        this.replayEvents?.push(event);  // Queue for later
-
-        // Reactions can aggregate immediately (not subject to the edit target lookup race)
-        if (event.isRelation(RelationType.Annotation)) {
-            this.timelineSet.relations?.aggregateParentEvent(event);
-            this.timelineSet.relations?.aggregateChildEvent(event, this.timelineSet);
-        }
-    } else {
-        // Add to timeline...
-        
-        // Only aggregate AFTER adding to timeline when thread is initialized
-        this.timelineSet.relations?.aggregateParentEvent(event);
-        this.timelineSet.relations?.aggregateChildEvent(event, this.timelineSet);
-    }
-}
-```
+Defer Replace aggregation until the thread is initialized and the event has been added to the thread timeline. Keep Annotation aggregation pre‑init to preserve reaction summaries; replay is safe because aggregation is idempotent. Also removed redundant manual aggregation in the post‑init path since timeline insertion already aggregates.
 
 ### Why This Works
 - Edits that arrive before initialization are queued in `replayEvents` and aggregated only after the target is present in the timeline.
@@ -73,13 +41,9 @@ private addRelatedThreadEvent(event: MatrixEvent, toStartOfTimeline: boolean): v
 
 ## Testing
 
-Added comprehensive test that reproduces the race condition:
-1. Creates a thread with `initialEventsFetched = false`
-2. Adds edit events before the original message
-3. Verifies that without the fix, aggregation creates a broken Relations object
-4. Confirms that with the fix, aggregation only happens after initialization
-
-The test fails without the fix (showing `targetEvent: null`) and passes with it.
+Added tests to cover both the regression and behavior guarantees:
+- Edit race regression: create a thread with `initialEventsFetched = false`, add edits before the original message, then initialize and replay. Without the fix, Replace relations aggregate prematurely and fail to link; with the fix, edits apply after replay.
+- Reaction idempotence: reactions aggregate pre‑init for visibility and remain deduplicated after replay (no double counting).
 
 ## Impact
 
