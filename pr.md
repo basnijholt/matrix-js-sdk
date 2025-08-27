@@ -16,12 +16,11 @@ The bug manifests as:
 
 ## The Solution
 
-Move the aggregation calls inside the `else` block of `addRelatedThreadEvent()` to ensure aggregation only happens when:
-1. The thread IS initialized (`initialEventsFetched = true`)
-2. The event has been added to the timeline
-3. The target event is findable
+Defer aggregation for edits until after the event is in the timeline and the thread is initialized, while allowing reactions to aggregate immediately. Concretely:
+1. Edits (`RelationType.Replace`): do not aggregate before initialization; queue in `replayEvents` and aggregate after adding to the timeline post-init.
+2. Reactions (`RelationType.Annotation`): aggregate immediately even before initialization to keep reaction summaries available; they will be re-aggregated safely on replay (idempotent).
 
-This prevents premature aggregation that creates broken Relations objects with null target events.
+This prevents premature aggregation of edits that creates broken Relations with `targetEvent: null`, while preserving the existing behavior for reactions.
 
 ## Technical Details
 
@@ -46,7 +45,13 @@ When the thread isn't initialized, the aggregation calls fail to find the target
 ```typescript
 private addRelatedThreadEvent(event: MatrixEvent, toStartOfTimeline: boolean): void {
     if (!this.initialEventsFetched) {
-        this.replayEvents?.push(event);  // Queue for later, no aggregation
+        this.replayEvents?.push(event);  // Queue for later
+
+        // Reactions can aggregate immediately (not subject to the edit target lookup race)
+        if (event.isRelation(RelationType.Annotation)) {
+            this.timelineSet.relations?.aggregateParentEvent(event);
+            this.timelineSet.relations?.aggregateChildEvent(event, this.timelineSet);
+        }
     } else {
         // Add to timeline...
         
@@ -58,10 +63,13 @@ private addRelatedThreadEvent(event: MatrixEvent, toStartOfTimeline: boolean): v
 ```
 
 ### Why This Works
-- Edits that arrive before initialization are queued in `replayEvents`
-- When the thread initializes, these events are replayed through `addEvent()`
-- On replay, the thread is initialized and aggregation succeeds
-- The target event can now be found and properly linked
+- Edits that arrive before initialization are queued in `replayEvents` and aggregated only after the target is present in the timeline.
+- Reactions aggregate immediately so reaction summaries remain available pre-init; during replay, re-aggregation is a no-op due to deduplication.
+- On replay, the thread is initialized and edit aggregation succeeds with proper target linking.
+
+### Idempotence and Deduplication
+- `Relations.addEvent` tracks relation event IDs and ignores duplicates, so re-aggregating reactions on replay does not double-count.
+- `EventTimelineSet.addEventToTimeline`/`insertEventIntoTimeline` also short-circuit on already-known events, avoiding duplicate timeline entries.
 
 ## Testing
 
@@ -78,16 +86,16 @@ The test fails without the fix (showing `targetEvent: null`) and passes with it.
 - **Bug frequency**: Affected ~10% of edited messages in threads (*in my application that edits messages many times*)
 - **User impact**: Messages appeared unedited when they should show edits
 - **Scope**: Only affects threads with server-side support enabled
-- **Risk**: Low - simply delays aggregation until the proper time
+- **Risk**: Low — edit aggregation is delayed to a safe point; reaction behavior is preserved and duplicate aggregation is idempotent.
 
 ## Notes for Reviewers
 
-The key insight is that aggregation must not happen until the thread is initialized and events are in the timeline. The bug was subtle because:
+The key insight is that edit aggregation must not happen until the thread is initialized and events are in the timeline. The bug was subtle because:
 1. It only occurred with specific timing (edits arriving during initialization)
 2. The aggregation appeared to work (Relations object created) but was broken internally
 3. The 90% success rate made it seem intermittent
 
-The fix ensures aggregation only happens when it can succeed, preventing the creation of broken Relations objects.
+The fix ensures edits only aggregate when they can succeed, preventing broken Relations objects. Reactions (e.g. 👍) still aggregate immediately; re-aggregation on replay is safe due to deduplication.
 
 ## Checklist
 
